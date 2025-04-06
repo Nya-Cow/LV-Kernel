@@ -1,0 +1,464 @@
+#include <string>
+#include <time.h>           //读时间获取
+#include <dirent.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/system_properties.h>
+
+#include "My_verify.h"
+
+#include "cJSON.h"
+#include "Encrypt.h"
+#include "Mysshttp.h"
+
+
+static time_t Maturity_time = 0;
+
+
+char *my_shell(const char *command) {
+	FILE *pipe = NULL;
+	char line[256] = { };
+    char *result = (char *) calloc(2048, sizeof(char));
+	memset(result, 0, sizeof(result));
+	pipe = popen(command, "r");
+    if (!pipe) {
+        return {};
+    }
+    while (!feof(pipe)) {
+        if (fgets(line, sizeof(line), pipe) != NULL) {
+    		strncat(result, line, strlen(line));
+        } else {
+        
+        }
+    }
+	pclose(pipe);
+	return result;
+}
+
+bool loadConfig_ver(char *cfgPath, void *data, size_t size) {
+    int fd = open(cfgPath, O_RDONLY);
+   	if (fd > 0) {
+   		read(fd, data, size);
+   		close(fd);
+    	return true;
+    } else {
+   	    return false;
+    }
+}
+bool saveConfig_ver(char *cfgPath, void *data, size_t size) {
+    int fd = open(cfgPath, O_TRUNC | O_WRONLY | O_CREAT, S_IRUSR | S_IWUSR);
+    if (fd > 0) {
+    	write(fd, data, size);	// 写入文本 // close(fd); 
+    	close(fd);
+   		return true;
+   	} else {
+ 	    return false;
+    }
+}     
+
+char *getAndroid_boot_serialno() {
+    char *prop_value = (char *) calloc(256, sizeof(char));
+    ::__system_property_get((char *)("ro.boot.serialno"), prop_value);
+    return prop_value;
+}
+char* getMacAddresses(const char *str_name) {
+    char *macAddress;
+    struct dirent *entry;
+    DIR *dir = opendir("/sys/class/net");
+    if (dir == NULL) {
+        perror("opendir");
+        return (char *)"";
+    }
+    while ((entry = readdir(dir)) != NULL) {
+        if (strncmp(entry->d_name, str_name, strlen(str_name)) == 0) {
+            char macFile[128] = {0};
+            snprintf(macFile, sizeof(macFile), "/sys/class/net/%s/address", entry->d_name);
+            FILE *file = fopen(macFile, "r");
+            if (file) {
+                char local_str[64] = {0};
+                macAddress = (char *)calloc(64, sizeof(char));
+                fgets(local_str, 64, file);
+                fclose(file);
+                snprintf(macAddress, strlen(local_str), "%s", local_str);
+            }
+        }
+    }
+    closedir(dir);
+    return macAddress;
+}
+
+
+int wbfd3408c915617b54992c2adf5c9127a(all_tinyCheck *all_check, int *yes, char *ret_err) {
+    char *host = (char *)("wy.llua.cn");
+	char *APPID = (char *) & all_check->APPID;
+	char *APPKEY = (char *) & all_check->APPKEY;
+	char *RC4KEY = (char *) & all_check->RC4KEY;
+    char *imei = (char *) & all_check->imei_;
+    char *km = (char *) & all_check->key_;
+
+	//printf("卡密： %s\n设备码： %s\n\n", km, imei);
+	if (strlen(km) == 0 || strlen(imei) == 0) {
+        sprintf(ret_err, "无设备码或者卡密!");   
+    	return 0;
+	}
+	
+	time_t t; //时间戳
+	t = time(NULL);
+	int ii = time(&t);
+    srand(time(NULL));
+	// 合并数据
+	char local_value[256];
+	char local_sign[512];
+	char local_data[768];
+	sprintf(local_value, "%d%d", ii, ::rand());
+	sprintf(local_sign, "kami=%s&markcode=%s&t=%d&%s", km, imei, ii, APPKEY);
+
+	MD5_CTX md5c;
+	MD5Init(&md5c);
+	unsigned char decrypt[16];
+	MD5Update(&md5c, (unsigned char *)&local_sign, strlen(local_sign));
+	MD5Final(&md5c, decrypt);
+	char lkey[32+1] = { 0 };
+	for (int i = 0; i < 16; i++) {
+		sprintf(&lkey[i * 2], "%02x", decrypt[i]);
+	}
+
+	// RC4加密
+	sprintf(local_data, "kami=%s&markcode=%s&t=%d&sign=%s&value=%s", km, imei, ii, lkey, local_value);
+    char *dataa = Encrypt(local_data, RC4KEY);
+	// 合并数据
+	char cs[1024];
+	sprintf(cs, "&data=%s", dataa);
+	free(dataa);
+	dataa = NULL;
+	
+	char url[1024];
+	sprintf(url, "api/?id=kmlogon&app=%s", APPID);	
+	// 提交数据
+	char *tijiao = httppost(host, url, cs);
+	if (tijiao == NULL) {
+        sprintf(ret_err, " 登录_请求失败!");
+        return 0;	 	
+	}
+
+	// RC4解密
+	char* tijiaoo = Decrypt(tijiao, RC4KEY);	
+    free(tijiao);
+    tijiao = NULL;
+	if (tijiaoo == NULL || strlen(tijiaoo) == 0) {
+        sprintf(ret_err, " 登录_RC4失败!");
+        return 0;	 		
+	}
+
+	//解析JSON
+	cJSON *cjson = cJSON_Parse(tijiaoo);	
+    free(tijiaoo);
+    tijiaoo = NULL;
+
+	
+	// 读取状态码
+	int code = cJSON_GetObjectItem(cjson, "code")->valueint;
+	// 服务器时间
+	int time = cJSON_GetObjectItem(cjson, "time")->valueint;
+	// 错误信息
+	char *msg = cJSON_GetObjectItem(cjson, "msg")->valuestring;	
+	// 登录校验
+	char *check = cJSON_GetObjectItem(cjson, "check")->valuestring;
+
+	if (all_check->Login_code == code) {//code判断	
+		cJSON *msgdata = cJSON_GetObjectItem(cjson, "msg");
+		long vip = cJSON_GetObjectItem(msgdata, "vip")->valuedouble;
+		char weijy[512];
+		sprintf(weijy, "%d%s%s", time, APPKEY, local_value);
+		// md5验证签名
+		MD5_CTX md5c;
+		MD5Init(&md5c);
+		unsigned char decrypt[16];
+		MD5Update(&md5c, (unsigned char *)&weijy, strlen(weijy));
+		MD5Final(&md5c, decrypt);
+		char ykey[32+1] = { 0 };
+		for (int i = 0; i < 16; i++) {
+			sprintf(&ykey[i * 2], "%02x", decrypt[i]);
+		}
+		// md5验证签名
+		if (strncmp(check, ykey, strlen(ykey)) == 0) {
+			//printf("登录成功\n");
+			if (vip) {
+				::Maturity_time = vip;
+				char buffer[128];
+                struct tm *info = ::localtime(&vip);
+                ::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", info);
+                sprintf(ret_err, "%s", buffer);   
+			} else {
+                sprintf(ret_err, "免费模式?");   
+			}
+			*yes = 10086;
+		} else {
+            cJSON_Delete(cjson);
+            sprintf(ret_err, "校验失败!");   
+          	return 0;
+ 		}
+	} else {
+        cJSON_Delete(cjson);
+        sprintf(ret_err, "%s", msg);   
+     	return 0;
+	}
+
+    cJSON_Delete(cjson);
+	return 1;
+}
+
+//解绑
+void bbsjs4646ekkdbdbdbdb(all_tinyCheck *all_check, char *ret_err) {
+    char *host = (char *)("wy.llua.cn");
+	char *APPID = (char *) & all_check->APPID;
+	char *APPKEY = (char *) & all_check->APPKEY;
+	char *RC4KEY = (char *) & all_check->RC4KEY;
+    char *imei = (char *) & all_check->imei_;
+    char *kami = (char *) & all_check->key_;
+
+
+    time_t t;
+    t = time(NULL);
+    int ii = time(&t);
+
+    // 合并数据
+    char local_value[256];
+    char local_sign[512];
+    char local_data[512];
+    sprintf(local_value, "%d", ii);
+    sprintf(local_sign, "kami=%s&markcode=%s&t=%d&%s", kami, imei, ii, APPKEY);
+
+    MD5_CTX md5c;
+    MD5Init(&md5c);
+    unsigned char decrypt[16];
+    MD5Update(&md5c, (unsigned char *)&local_sign, strlen(local_sign));
+    MD5Final(&md5c, decrypt);
+    char lkey[32+1] = { 0 };
+    for (int i = 0; i < 16; i++) {
+        sprintf(&lkey[i * 2], "%02x", decrypt[i]);
+    }
+    char weiyan[512];
+    sprintf(weiyan, "%d%s%s", ii, APPKEY, local_value);
+    sprintf(local_data, "kami=%s&markcode=%s&t=%d&sign=%s&value=%s", kami, imei, ii, lkey, local_value);
+    char *new_local_data = Encrypt(local_data, RC4KEY);
+    char cs[1024];
+    sprintf(cs, "&data=%s", new_local_data);
+    free(new_local_data);
+    new_local_data = NULL;
+    char url[1024];
+    sprintf(url, "api/?id=kmdismiss&app=%s", APPID);
+     
+    char *tijiao = httppost(host, url, cs);
+	if (tijiao == NULL) {
+        sprintf(ret_err, " 解绑_请求失败!");
+        return;	 	
+	}
+    //RC4操作
+    char *tijiaoo = Decrypt(tijiao, RC4KEY);
+    free(tijiao);
+    tijiao = NULL;
+	if (tijiaoo == NULL || strlen(tijiaoo) == 0) {
+        sprintf(ret_err, " 解绑_RC4失败!");
+        return;	 		
+	}
+
+    cJSON *cjson = cJSON_Parse(tijiaoo);
+    free(tijiaoo);
+    tijiaoo = NULL;
+
+    // 读取状态码
+    int code = cJSON_GetObjectItem(cjson, "code")->valueint;
+    char *msg = cJSON_GetObjectItem(cjson, "msg")->valuestring;
+    if (code == 200) { // 200是你的状态码即是code
+        sprintf(ret_err, "解绑成功");   
+    } else {
+        sprintf(ret_err, "%s", msg);   
+    }
+    cJSON_Delete(cjson);
+}
+
+//公告
+int get_Announcement_data(all_tinyCheck *all_check, char *ret_str) {
+    char *host = (char *)("wy.llua.cn");
+	char *APPID = (char *) & all_check->APPID;
+	char *APPKEY = (char *) & all_check->APPKEY;
+	char *RC4KEY = (char *) & all_check->RC4KEY;
+
+
+    char *app_gg = NULL;
+    char dmdlData[128];
+    char local_data[512];
+    char local_url1[1024];
+    time_t t;
+    t = time(NULL);
+    int ii = time(&t);
+    sprintf(dmdlData, "api/?id=notice&app=%s", APPID);
+    sprintf(local_data, "%d%s", ii, APPKEY);
+    char* adga1 = Encrypt(local_data, RC4KEY);
+    sprintf(local_url1, "&data=%s", adga1);
+    free(adga1);
+    adga1 = NULL;    
+    char *ztm1 = httppost(host, (char *)&dmdlData, (char *)&local_url1);
+	if (ztm1 == NULL) {
+        sprintf(ret_str, " 公告_请求失败!");
+        return 0;	 	
+	}
+
+    char* abcdstr = Decrypt(ztm1, RC4KEY);
+    free(ztm1);
+    ztm1 = NULL;
+	if (abcdstr == NULL || strlen(abcdstr) == 0) {
+        sprintf(ret_str, " 公告_RC4失败!");
+        return 0;	 		
+	}
+
+    cJSON *cjson = cJSON_Parse(abcdstr);
+    free(abcdstr);
+    abcdstr = NULL;
+    
+    if (cjson == NULL) {
+        sprintf(ret_str, "无法解析域名");   
+        return 0;        
+    }
+    int code = cJSON_GetObjectItem(cjson, "code")->valueint;
+    if (code == 200) { // 200是你的状态码即是code
+        char strDay[1024] = {0};
+        cJSON *pValue = cJSON_GetObjectItem(cjson, "msg"); // 解析value字段内容
+        if (!pValue) {  // 判断value字段是否json格式
+            cJSON_Delete(cjson);
+            return 0;
+        } else {
+            cJSON *pDay = cJSON_GetObjectItem(pValue, "app_gg");  // 解析子节点pValue的day字段字符串内容
+            if (!pDay) { // 判断day字段是否json格式
+                cJSON_Delete(cjson);
+                return 0;
+            } else {
+                if (cJSON_IsString(pDay)) {// 判断day字段是否string类型
+                    app_gg = strcpy(strDay, pDay->valuestring); // 拷贝内容到字符串数组
+                }
+            }
+        }
+    }
+
+    sprintf(ret_str, "%s", app_gg);   
+    cJSON_Delete(cjson);
+    return 1;
+
+}
+
+//心跳
+void *Circular_authentication(void *arg) {
+    int local_yes;
+    int fault_tolerant = 0;
+    char local_errStr[64] = {0};
+    all_tinyCheck *data_rt = (all_tinyCheck *)arg;
+    while (true) {
+        //sleep(5); //5秒
+        sleep(60 * 10); //十分钟
+        local_yes = 0;
+        int ret_it = ::wbfd3408c915617b54992c2adf5c9127a(data_rt, (int *)&local_yes, (char *)&local_errStr);
+        if (local_yes == 10086 && ret_it == 1) { //成功
+            fault_tolerant = 0;       
+        } else {
+            fault_tolerant++;
+            if (fault_tolerant == 2) {
+                if (getuid() == 0) {
+                    system("am force-stop com.example.hunting");   
+                }
+                printf(" 心跳不通过\n");
+                printf(" exit__\n");
+                exit(-1);            
+            }
+        }
+    }
+	return NULL;
+}
+
+void 微验验证(int *yes, char *str_err) {
+    verify_Start:
+    
+    *yes = 0; 
+    char *android_id = NULL;
+    char Kami[128] = {0};   
+    char *key_path = (char *)("/storage/emulated/0/lv卡密");   
+    loadConfig_ver(key_path, (void *)Kami, sizeof(Kami));
+    if (strlen(Kami) == 0) {
+        printf("请输入卡密: \n");
+        scanf("%s", Kami);  // 从标准输入流中读取字符串    
+        if (strlen(Kami) == 0) {
+            printf("什么都没输入\n");
+            goto verify_Start;
+    		//exit(1); 	
+        } 
+    }
+
+
+    if (android_id == NULL || strlen(android_id) == 0) {
+        char *local_ret = my_shell("settings get secure android_id");
+        if (strlen(local_ret) > 4) {
+            local_ret[strlen(local_ret)-1] = '\0'; //去掉换行
+            android_id = local_ret;
+            //printf("android_id : %s (%d)\n", android_id, strlen(local_ret));
+        } else {
+            free(local_ret);
+            local_ret = NULL;
+        }
+    }
+    if (android_id == NULL || strlen(android_id) == 0) {
+        android_id = getAndroid_boot_serialno();
+    }    
+    /*
+    if (android_id == NULL || strlen(android_id) == 0) {
+        android_id = getMacAddresses("wlan1");
+    }
+    if (android_id == NULL || strlen(android_id) == 0) {
+        android_id = getMacAddresses("p2p0");
+    }
+    if (android_id == NULL || strlen(android_id) == 0) {
+        android_id = getMacAddresses("wifi-aware0");
+    }
+    if (android_id == NULL || strlen(android_id) == 0) {
+        android_id = getMacAddresses("bond0");
+    }
+    if (android_id == NULL || strlen(android_id) == 0) {
+        android_id = getMacAddresses("wlan0");
+    }
+    */ 
+    if (android_id == NULL || strlen(android_id) == 0) {
+        printf("设备码获取错误\n");
+        exit(0);    
+    }   
+
+
+    all_tinyCheck *local_CheckData = get_all_tinyCheckData();
+    snprintf(local_CheckData->imei_, sizeof(local_CheckData->imei_), "%s", android_id);
+    snprintf(local_CheckData->key_, sizeof(local_CheckData->key_), "%s", Kami);
+    int ret_it = ::wbfd3408c915617b54992c2adf5c9127a(local_CheckData, (int *)yes, (char *)str_err);
+    if (*yes == 10086 && ret_it == 1) { //成功
+        saveConfig_ver(key_path, (void *)Kami, strlen(Kami));
+    } else { //不成功
+     	remove(key_path);
+        printf("登陆状态 : %s\n", str_err);   
+        goto verify_Start;
+        //exit(0);    
+    }
+}    
+
+time_t get_Maturity_time() {
+    return Maturity_time;
+}
+
+
+all_tinyCheck* get_all_tinyCheckData() {
+	static all_tinyCheck *local_CheckData = (all_tinyCheck *) calloc(1, sizeof(all_tinyCheck));
+	if (local_CheckData->Login_code == 0) {
+    	local_CheckData->Login_code = 11570;
+     	snprintf(local_CheckData->APPID, sizeof(local_CheckData->APPID), "%d", 76895);
+     	snprintf(local_CheckData->APPKEY, sizeof(local_CheckData->APPKEY), "%s", "vY8LRR6Z4y4yVQ0X");
+    	snprintf(local_CheckData->RC4KEY, sizeof(local_CheckData->RC4KEY), "%s", "40b882fdcaad8ecffa0c6678550aa0e6");	
+    }
+    return local_CheckData;
+}
+
